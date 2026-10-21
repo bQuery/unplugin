@@ -24,7 +24,8 @@ export interface ViewsOptions {
   /** Files never compiled implicitly (the query flag still opts them in). */
   exclude?: FilePattern | FilePattern[];
   /**
-   * Query flag that opts any `.html` import into compilation.
+   * Query flag that opts any `.html` import into compilation. Imports carrying
+   * any other query (`?raw`, `?url`, …) are never compiled.
    * @default 'bq-view'
    */
   query?: string;

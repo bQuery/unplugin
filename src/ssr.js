@@ -18,8 +18,55 @@ import { readTextIfExists } from './utils.js';
 /** Default server entry (relative to the project root). */
 export const DEFAULT_SSR_ENTRY = 'src/entry-server.ts';
 
-/** Headers that must not be copied from a buffered `Response`. */
-const DROPPED_HEADERS = new Set(['content-length', 'content-encoding', 'transfer-encoding']);
+/**
+ * Headers never copied from a render result. A `Response` body is always read
+ * decoded (`fetch()` undoes `content-encoding` but keeps the header), so the
+ * upstream encoding and length no longer describe it, and hop-by-hop headers
+ * (RFC 9110 §7.6.1) belong to the upstream connection, not to this one. Node
+ * sets the length or chunked framing for the body it actually writes.
+ */
+const DROPPED_HEADERS = new Set([
+  'content-encoding',
+  'content-length',
+  'transfer-encoding',
+  'connection',
+  'keep-alive',
+  'proxy-connection',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'upgrade',
+]);
+
+/**
+ * Copies status-independent headers of a `Response` to a Node response,
+ * without encoding, length and hop-by-hop headers (including any that the
+ * `Connection` header names). Every `Set-Cookie` value is kept separately.
+ *
+ * @param {Headers} headers - The `Response` headers.
+ * @param {import('node:http').ServerResponse} res - Node response.
+ */
+const copyHeaders = (headers, res) => {
+  const listed = new Set(
+    (headers.get('connection') ?? '')
+      .split(',')
+      .map((name) => name.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  headers.forEach((value, name) => {
+    if (name === 'set-cookie' || DROPPED_HEADERS.has(name) || listed.has(name)) return;
+    res.setHeader(name, value);
+  });
+  const single = headers.get('set-cookie');
+  const cookies =
+    typeof headers.getSetCookie === 'function'
+      ? headers.getSetCookie()
+      : single === null
+        ? []
+        : [single];
+  if (cookies.length > 0) res.setHeader('set-cookie', cookies);
+};
 
 /**
  * Whether the middleware should try to render this request.
@@ -69,16 +116,12 @@ const isResponse = (value) =>
  * Writes a `Response` body to a Node response, streaming when possible.
  *
  * @param {Response} response - The Web response.
- * @param {any} res - Node response.
+ * @param {import('node:http').ServerResponse} res - Node response.
  * @param {boolean} head - Whether the request was `HEAD`.
  */
 const pipeResponse = async (response, res, head) => {
   res.statusCode = response.status;
-  response.headers.forEach((value, name) => {
-    if (name !== 'set-cookie') res.setHeader(name, value);
-  });
-  const cookies = response.headers.getSetCookie?.() ?? [];
-  if (cookies.length > 0) res.setHeader('set-cookie', cookies);
+  copyHeaders(response.headers, res);
   if (head || !response.body) {
     res.end();
     return;
@@ -163,11 +206,7 @@ export const createSsrPlugin = (options, shared) => {
       if (contentType.includes('text/html') && transformHtml) {
         const html = await transform(await result.text());
         res.statusCode = result.status;
-        result.headers.forEach((value, name) => {
-          if (!DROPPED_HEADERS.has(name) && name !== 'set-cookie') res.setHeader(name, value);
-        });
-        const cookies = result.headers.getSetCookie?.() ?? [];
-        if (cookies.length > 0) res.setHeader('set-cookie', cookies);
+        copyHeaders(result.headers, res);
         res.end(req.method === 'HEAD' ? undefined : html);
         return;
       }

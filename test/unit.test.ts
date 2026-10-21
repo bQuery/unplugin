@@ -17,6 +17,7 @@ import bqueryRspack from '../rspack.js';
 import bqueryVite from '../vite.js';
 import bqueryWebpack from '../webpack.js';
 import { createFilter, globToRegExp, toJsLiteral, writeIfChanged } from '../src/utils.js';
+import { isViewQuery } from '../src/views.js';
 import { createProject, SAMPLE_FILES } from './helpers';
 
 const names = (plugins: Array<{ name: string }>) => plugins.map((plugin) => plugin.name);
@@ -147,14 +148,25 @@ describe('generators', () => {
   });
 
   it('handles bq-on statement lists with any supported @bquery/bquery', async () => {
-    // `a(); b()` in bq-on compiles with bQuery releases after 1.17.2; 1.17.2
-    // skips it (runtime fallback + warning). Either way the module is valid.
+    // `a(); b()` in bq-on compiles with bQuery releases after 1.17.2 (which
+    // register it in a separate statements map); 1.17.2 skips it (runtime
+    // fallback + warning). Either way the module is valid.
     const handler = '$event.preventDefault(); add()';
     const { code, stats } = buildViewModule(`<form bq-on:submit="${handler}"></form>`, {}, false);
     await transform(code, { format: 'esm', loader: 'js' });
     const skipped = stats.skipped.some((entry) => entry.expression === handler);
-    expect(code.includes(`${JSON.stringify(handler)}: (__bq_ctx) =>`)).toBe(!skipped);
+    const registration = code.slice(0, code.indexOf('const template'));
+    expect(registration.includes(JSON.stringify(handler))).toBe(!skipped);
     expect(stats.total).toBe(1);
+  });
+
+  it('compiles only bare view imports or the view marker', () => {
+    for (const id of ['a.view.html', 'a.html?bq-view', 'a.html?import&bq-view&t=123']) {
+      expect(isViewQuery(id, 'bq-view')).toBe(true);
+    }
+    for (const id of ['a.view.html?raw', 'a.view.html?url', 'a.html?bq-view&inline']) {
+      expect(isViewQuery(id, 'bq-view')).toBe(false);
+    }
   });
 
   it('adds HMR handling and honours the import specifier', () => {

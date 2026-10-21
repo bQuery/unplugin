@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { createServer as createHttpServer, get as httpGet, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { gzipSync } from 'node:zlib';
 import { build, createLogger, createServer, type Rollup, type ViteDevServer } from 'vite';
 import bqueryVite from '../vite.js';
 import { createProject, SAMPLE_FILES, waitFor, type TempProject } from './helpers';
@@ -24,6 +26,10 @@ export async function render(request, ctx) {
     return renderToResponse(template, { title: 'Rendered by bQuery' }, { context: ssr });
   }
   if (pathname === '/boom') throw new Error('render exploded');
+  if (pathname === '/proxied') {
+    // fetch() decodes the gzip body but keeps the upstream's encoding headers.
+    return fetch(ssr.url.searchParams.get('upstream'));
+  }
   if (pathname === '/api-like') {
     return new Response(JSON.stringify({ ok: true }), {
       status: 201,
@@ -109,14 +115,128 @@ describe('vite build', () => {
   });
 });
 
+/** A Node response read without decoding: status, raw headers and body bytes. */
+const rawGet = (url: string, accept = 'text/html') =>
+  new Promise<{
+    status: number;
+    headers: Record<string, string | string[] | undefined>;
+    body: string;
+  }>((resolve, reject) => {
+    httpGet(url, { headers: { accept } }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      res.on('end', () =>
+        resolve({
+          status: res.statusCode ?? 0,
+          headers: res.headers,
+          body: Buffer.concat(chunks).toString('utf8'),
+        })
+      );
+      res.on('error', reject);
+    }).on('error', reject);
+  });
+
+/** An upstream that always answers with a gzip-compressed body. */
+const startGzipUpstream = async () => {
+  const bodies: Record<string, { type: string; body: string }> = {
+    '/data.json': { type: 'application/json', body: JSON.stringify({ hello: 'gzip'.repeat(64) }) },
+    '/page.html': {
+      type: 'text/html; charset=utf-8',
+      body: `<!doctype html><html><head></head><body><p>${'upstream '.repeat(64)}</p></body></html>`,
+    },
+  };
+  const upstream: Server = createHttpServer((req, res) => {
+    const entry = bodies[req.url ?? ''];
+    if (!entry) {
+      res.statusCode = 404;
+      res.end();
+      return;
+    }
+    const gz = gzipSync(entry.body);
+    res.writeHead(200, {
+      'content-type': entry.type,
+      'content-encoding': 'gzip',
+      'content-length': String(gz.length),
+      'x-upstream': 'yes',
+      'set-cookie': ['a=1; Path=/', 'b=2; Path=/; HttpOnly'],
+    });
+    res.end(gz);
+  });
+  await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+  const { port } = upstream.address() as AddressInfo;
+  return { upstream, url: `http://127.0.0.1:${port}`, bodies };
+};
+
+describe('vite build: view imports with a query', () => {
+  let project: TempProject;
+  let output: Rollup.RollupOutput['output'];
+
+  beforeAll(async () => {
+    project = createProject({
+      'src/main.js': [
+        "import template from './views/home.view.html';",
+        "import raw from './views/raw.view.html?raw';",
+        "import url from './views/url.view.html?url';",
+        'console.log(template, raw, url);',
+      ].join('\n'),
+      'src/views/home.view.html': '<p bq-text="count + 1"></p>',
+      'src/views/raw.view.html': '<aside bq-text="rawOnly + 1"></aside>',
+      'src/views/url.view.html': '<nav bq-text="urlOnly + 1"></nav>',
+    });
+    const result = (await build({
+      root: project.root,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [bqueryVite()],
+      build: {
+        write: false,
+        minify: false,
+        assetsInlineLimit: 0,
+        rollupOptions: { input: project.path('src/main.js'), external: [/^@bquery\//] },
+      },
+    })) as Rollup.RollupOutput;
+    output = result.output;
+  });
+
+  afterAll(() => project.cleanup());
+
+  const js = () =>
+    output
+      .filter((file): file is Rollup.OutputChunk => file.type === 'chunk')
+      .map((chunk) => chunk.code)
+      .join('\n');
+
+  it('still compiles bare *.view.html imports', () => {
+    expect(js()).toContain('registerCompiledExpressions');
+    expect(js()).toContain('__bq_ctx.count + 1');
+  });
+
+  it('returns the raw markup for ?raw', () => {
+    expect(js()).toMatch(/<aside bq-text=\\?"rawOnly \+ 1\\?"><\/aside>/);
+    expect(js()).not.toContain('__bq_ctx.rawOnly');
+  });
+
+  it('returns an asset URL for ?url', () => {
+    const asset = output.find(
+      (file): file is Rollup.OutputAsset => file.type === 'asset' && file.fileName.endsWith('.html')
+    );
+    expect(asset).toBeDefined();
+    expect(String(asset!.source)).toBe('<nav bq-text="urlOnly + 1"></nav>');
+    expect(js()).toContain(`/${asset!.fileName}`);
+    expect(js()).not.toContain('__bq_ctx.urlOnly');
+  });
+});
+
 describe('vite dev server', () => {
   let project: TempProject;
   let server: ViteDevServer;
   let base: string;
+  let gzip: Awaited<ReturnType<typeof startGzipUpstream>>;
   const errors: string[] = [];
   const routeUpdates: string[] = [];
 
   beforeAll(async () => {
+    gzip = await startGzipUpstream();
     project = createProject({
       ...SAMPLE_FILES,
       'index.html': INDEX_HTML,
@@ -150,6 +270,7 @@ describe('vite dev server', () => {
 
   afterAll(async () => {
     await server.close();
+    gzip.upstream.close();
     project.cleanup();
   });
 
@@ -202,6 +323,39 @@ describe('vite dev server', () => {
     expect(await res.json()).toEqual({ ok: true });
   });
 
+  it('drops stale encoding headers from a fetched (decoded) Response', async () => {
+    const res = await rawGet(
+      `${base}/proxied?upstream=${encodeURIComponent(`${gzip.url}/data.json`)}`
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers['content-encoding']).toBeUndefined();
+    const length = res.headers['content-length'];
+    if (length !== undefined) expect(Number(length)).toBe(Buffer.byteLength(res.body));
+    expect(res.body).toBe(gzip.bodies['/data.json'].body);
+    expect(res.headers['content-type']).toBe('application/json');
+    expect(res.headers['x-upstream']).toBe('yes');
+    expect(res.headers['set-cookie']).toEqual(['a=1; Path=/', 'b=2; Path=/; HttpOnly']);
+    // A decoding client (the browser) reads it too.
+    const decoded = await fetch(
+      `${base}/proxied?upstream=${encodeURIComponent(`${gzip.url}/data.json`)}`,
+      { headers: { accept: 'text/html' } }
+    );
+    expect(await decoded.json()).toEqual(JSON.parse(gzip.bodies['/data.json'].body));
+  });
+
+  it('drops stale encoding headers from a fetched HTML Response', async () => {
+    const res = await rawGet(
+      `${base}/proxied?upstream=${encodeURIComponent(`${gzip.url}/page.html`)}`
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers['content-encoding']).toBeUndefined();
+    const length = res.headers['content-length'];
+    if (length !== undefined) expect(Number(length)).toBe(Buffer.byteLength(res.body));
+    expect(res.body).toContain('upstream upstream');
+    expect(res.body).toContain('/@vite/client');
+    expect(res.headers['set-cookie']).toEqual(['a=1; Path=/', 'b=2; Path=/; HttpOnly']);
+  });
+
   it('falls through to Vite when render returns null', async () => {
     const res = await get('/fallthrough');
     expect(res.status).toBe(200);
@@ -232,6 +386,32 @@ describe('vite dev server', () => {
     expect(code).toContain('"count + 1": (__bq_ctx) => (__bq_ctx.count + 1)');
     expect(code).toContain('import.meta.hot.accept');
     expect(code).toContain('export default template');
+  });
+
+  it('recompiles a view after it is edited (HMR re-import)', async () => {
+    const main = await server.transformRequest('/src/main.js');
+    const url = /"(\/src\/views\/home\.view\.html\?[^"]*bq-view[^"]*)"/.exec(main!.code)?.[1];
+    project.write('src/views/home.view.html', '<div><p bq-text="count + 2"></p></div>');
+    // The HMR client re-imports the module with a `t=` timestamp.
+    await waitFor(
+      async () =>
+        (await (await get(`${url}&t=${Date.now()}`, '*/*')).text()).includes(
+          '"count + 2": (__bq_ctx) => (__bq_ctx.count + 2)'
+        ),
+      5000,
+      'recompiled view'
+    );
+  });
+
+  it('leaves ?raw and ?url view imports to Vite', async () => {
+    const raw = await server.transformRequest('/src/views/page.html?raw');
+    expect(raw!.code).toContain('<section bq-show=');
+    expect(raw!.code).not.toContain('registerCompiledExpressions');
+    const viewRaw = await server.transformRequest('/src/views/home.view.html?raw');
+    expect(viewRaw!.code).not.toContain('registerCompiledExpressions');
+    expect(viewRaw!.code).toContain('export default');
+    const url = await server.transformRequest('/src/views/home.view.html?url');
+    expect(url!.code).toContain('export default "/src/views/home.view.html"');
   });
 
   it('regenerates virtual:bquery/routes when a route file is added', async () => {
