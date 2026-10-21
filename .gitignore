@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Package tarballs and coverage
+*.tgz
+coverage/
+
+# Lockfiles of other package managers (bun.lock is committed)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Editors and OS files
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Logs and env
+*.log
+.env
+.env.*

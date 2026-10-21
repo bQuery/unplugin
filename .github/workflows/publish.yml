@@ -1,0 +1,63 @@
+# Manual npm release with provenance through npm Trusted Publishing (OIDC).
+#
+# SETUP REQUIRED before the first run:
+#   1. On npmjs.com, open the @bquery/unplugin package settings (for the very
+#      first release, publish 0.1.0 once by hand or create the package first)
+#      and add a Trusted Publisher: GitHub Actions, organization `bQuery`,
+#      repository `unplugin`, workflow file `publish.yml`, environment `npm`.
+#   2. In this repository, create the `npm` environment (Settings →
+#      Environments) and, if wanted, require a reviewer for it.
+# No NPM_TOKEN secret is needed: npm exchanges the workflow's OIDC token.
+# Bump `version` in package.json and the CHANGELOG before running it.
+
+name: Publish to npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Run `npm publish --dry-run` only'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write # npm Trusted Publishing + provenance
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.x'
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck, lint, format check and test
+        run: bun run check
+
+      - name: Update npm (Trusted Publishing needs npm 11.5.1+)
+        run: npm install -g npm@latest
+
+      - name: Publish (dry run)
+        if: ${{ inputs.dry-run }}
+        run: npm publish --access public --provenance --dry-run
+
+      - name: Publish
+        if: ${{ !inputs.dry-run }}
+        run: npm publish --access public --provenance
