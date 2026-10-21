@@ -167,6 +167,66 @@ const startGzipUpstream = async () => {
   return { upstream, url: `http://127.0.0.1:${port}`, bodies };
 };
 
+describe('vite build: view imports with a query', () => {
+  let project: TempProject;
+  let output: Rollup.RollupOutput['output'];
+
+  beforeAll(async () => {
+    project = createProject({
+      'src/main.js': [
+        "import template from './views/home.view.html';",
+        "import raw from './views/raw.view.html?raw';",
+        "import url from './views/url.view.html?url';",
+        'console.log(template, raw, url);',
+      ].join('\n'),
+      'src/views/home.view.html': '<p bq-text="count + 1"></p>',
+      'src/views/raw.view.html': '<aside bq-text="rawOnly + 1"></aside>',
+      'src/views/url.view.html': '<nav bq-text="urlOnly + 1"></nav>',
+    });
+    const result = (await build({
+      root: project.root,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [bqueryVite()],
+      build: {
+        write: false,
+        minify: false,
+        assetsInlineLimit: 0,
+        rollupOptions: { input: project.path('src/main.js'), external: [/^@bquery\//] },
+      },
+    })) as Rollup.RollupOutput;
+    output = result.output;
+  });
+
+  afterAll(() => project.cleanup());
+
+  const js = () =>
+    output
+      .filter((file): file is Rollup.OutputChunk => file.type === 'chunk')
+      .map((chunk) => chunk.code)
+      .join('\n');
+
+  it('still compiles bare *.view.html imports', () => {
+    expect(js()).toContain('registerCompiledExpressions');
+    expect(js()).toContain('__bq_ctx.count + 1');
+  });
+
+  it('returns the raw markup for ?raw', () => {
+    expect(js()).toMatch(/<aside bq-text=\\?"rawOnly \+ 1\\?"><\/aside>/);
+    expect(js()).not.toContain('__bq_ctx.rawOnly');
+  });
+
+  it('returns an asset URL for ?url', () => {
+    const asset = output.find(
+      (file): file is Rollup.OutputAsset => file.type === 'asset' && file.fileName.endsWith('.html')
+    );
+    expect(asset).toBeDefined();
+    expect(String(asset!.source)).toBe('<nav bq-text="urlOnly + 1"></nav>');
+    expect(js()).toContain(`/${asset!.fileName}`);
+    expect(js()).not.toContain('__bq_ctx.urlOnly');
+  });
+});
+
 describe('vite dev server', () => {
   let project: TempProject;
   let server: ViteDevServer;
@@ -326,6 +386,32 @@ describe('vite dev server', () => {
     expect(code).toContain('"count + 1": (__bq_ctx) => (__bq_ctx.count + 1)');
     expect(code).toContain('import.meta.hot.accept');
     expect(code).toContain('export default template');
+  });
+
+  it('recompiles a view after it is edited (HMR re-import)', async () => {
+    const main = await server.transformRequest('/src/main.js');
+    const url = /"(\/src\/views\/home\.view\.html\?[^"]*bq-view[^"]*)"/.exec(main!.code)?.[1];
+    project.write('src/views/home.view.html', '<div><p bq-text="count + 2"></p></div>');
+    // The HMR client re-imports the module with a `t=` timestamp.
+    await waitFor(
+      async () =>
+        (await (await get(`${url}&t=${Date.now()}`, '*/*')).text()).includes(
+          '"count + 2": (__bq_ctx) => (__bq_ctx.count + 2)'
+        ),
+      5000,
+      'recompiled view'
+    );
+  });
+
+  it('leaves ?raw and ?url view imports to Vite', async () => {
+    const raw = await server.transformRequest('/src/views/page.html?raw');
+    expect(raw!.code).toContain('<section bq-show=');
+    expect(raw!.code).not.toContain('registerCompiledExpressions');
+    const viewRaw = await server.transformRequest('/src/views/home.view.html?raw');
+    expect(viewRaw!.code).not.toContain('registerCompiledExpressions');
+    expect(viewRaw!.code).toContain('export default');
+    const url = await server.transformRequest('/src/views/home.view.html?url');
+    expect(url!.code).toContain('export default "/src/views/home.view.html"');
   });
 
   it('regenerates virtual:bquery/routes when a route file is added', async () => {

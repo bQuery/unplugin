@@ -1,7 +1,8 @@
 /**
  * View precompilation: turns `*.view.html` (or any `*.html?bq-view`) imports
  * into the module emitted by `@bquery/bquery/view/compiler`, plus a default
- * export holding the template markup.
+ * export holding the template markup. Imports with a query of their own
+ * (`?raw`, `?url`, `?inline`, …) are left to the bundler and other plugins.
  *
  * @module @bquery/unplugin/views
  */
@@ -10,13 +11,48 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { compileViews, emitModule } from '@bquery/bquery/view/compiler';
-import { cleanId, createFilter, hasQueryFlag, toJsLiteral, toPosix, warnVia } from './utils.js';
+import {
+  cleanId,
+  createFilter,
+  hasQueryFlag,
+  queryOf,
+  toJsLiteral,
+  toPosix,
+  warnVia,
+} from './utils.js';
 
 /** Default glob for files treated as view templates without a query flag. */
 export const DEFAULT_VIEW_INCLUDE = ['**/*.view.html'];
 
 /** Default query flag that opts any `.html` import into view compilation. */
 export const DEFAULT_VIEW_QUERY = 'bq-view';
+
+/**
+ * Query parts the Vite dev server adds for its own transport (`?import` on
+ * non-JS URLs, `?t=` on HMR re-imports). They do not ask for another module.
+ *
+ * @param {string} part - One `&`-separated query part.
+ * @returns {boolean} Whether Vite adds it itself.
+ */
+const isViteTransportPart = (part) => part === 'import' || /^t=\d+$/.test(part);
+
+/**
+ * Whether an id's query is empty or holds nothing but the view marker (and
+ * Vite's transport parts). Any other query, such as Vite's `?raw`, `?url` or
+ * `?inline`, asks for something other than the compiled view, so those ids are
+ * left to the bundler and its other plugins.
+ *
+ * @param {string} id - A module specifier or id.
+ * @param {string} flag - The view query flag.
+ * @returns {boolean} Whether the plugin may compile it.
+ */
+export const isViewQuery = (id, flag) =>
+  queryOf(id)
+    .split('&')
+    .every(
+      (part) =>
+        part === '' || part === flag || part.startsWith(`${flag}=`) || isViteTransportPart(part)
+    );
 
 /**
  * Builds the JavaScript module for one template.
@@ -95,7 +131,7 @@ export const createViewsPlugin = (options, shared) => {
     resolveId(source, importer, resolveOptions) {
       if (source.startsWith('\0') || resolveOptions?.isEntry) return null;
       const file = cleanId(source);
-      if (!file.endsWith('.html')) return null;
+      if (!file.endsWith('.html') || !isViewQuery(source, query)) return null;
       const flagged = hasQueryFlag(source, query);
       const abs = resolveTemplate(file, importer);
       if (!abs) return null;
@@ -107,10 +143,10 @@ export const createViewsPlugin = (options, shared) => {
       return `${toPosix(abs)}?${query}`;
     },
     loadInclude(id) {
-      return hasQueryFlag(id, query) && cleanId(id).endsWith('.html');
+      return hasQueryFlag(id, query) && isViewQuery(id, query) && cleanId(id).endsWith('.html');
     },
     async load(id) {
-      if (!hasQueryFlag(id, query)) return null;
+      if (!hasQueryFlag(id, query) || !isViewQuery(id, query)) return null;
       const file = cleanId(id);
       this.addWatchFile?.(file);
       const template = await readFile(file, 'utf8');
