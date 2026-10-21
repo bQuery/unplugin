@@ -148,13 +148,15 @@ describe('generators', () => {
   });
 
   it('handles bq-on statement lists with any supported @bquery/bquery', async () => {
-    // `a(); b()` in bq-on compiles with bQuery releases after 1.17.2; 1.17.2
-    // skips it (runtime fallback + warning). Either way the module is valid.
+    // `a(); b()` in bq-on compiles with bQuery releases after 1.17.2 (which
+    // register it in a separate statements map); 1.17.2 skips it (runtime
+    // fallback + warning). Either way the module is valid.
     const handler = '$event.preventDefault(); add()';
     const { code, stats } = buildViewModule(`<form bq-on:submit="${handler}"></form>`, {}, false);
     await transform(code, { format: 'esm', loader: 'js' });
     const skipped = stats.skipped.some((entry) => entry.expression === handler);
-    expect(code.includes(`${JSON.stringify(handler)}: (__bq_ctx) =>`)).toBe(!skipped);
+    const registration = code.slice(0, code.indexOf('const template'));
+    expect(registration.includes(JSON.stringify(handler))).toBe(!skipped);
     expect(stats.total).toBe(1);
   });
 
