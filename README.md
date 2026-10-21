@@ -146,7 +146,10 @@ one warning for each of them.
 
 The SSR entry exports `render(request: Request, ctx)`. `ctx` holds `url`,
 `template`, `nonce`, `dev` and `server`. `render` returns an HTML string, a
-`Response`, or `null` to fall through to the next middleware.
+`Response`, or `null` to fall through to the next middleware. A `Response`
+keeps its status and headers, except `content-encoding`, `content-length` and
+hop-by-hop headers: its body is read decoded (as `fetch()` returns it), so
+those no longer describe what the middleware sends. Every `Set-Cookie` is kept.
 
 ## Options
 
