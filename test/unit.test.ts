@@ -147,17 +147,47 @@ describe('generators', () => {
     expect(stats).toEqual({ total: 1, compiled: 1, skipped: [] });
   });
 
-  it('handles bq-on statement lists with any supported @bquery/bquery', async () => {
-    // `a(); b()` in bq-on compiles with bQuery releases after 1.17.2 (which
-    // register it in a separate statements map); 1.17.2 skips it (runtime
-    // fallback + warning). Either way the module is valid.
+  it('compiles bq-on statement lists into the statements map', async () => {
     const handler = '$event.preventDefault(); add()';
-    const { code, stats } = buildViewModule(`<form bq-on:submit="${handler}"></form>`, {}, false);
-    await transform(code, { format: 'esm', loader: 'js' });
-    const skipped = stats.skipped.some((entry) => entry.expression === handler);
-    const registration = code.slice(0, code.indexOf('const template'));
-    expect(registration.includes(JSON.stringify(handler))).toBe(!skipped);
-    expect(stats.total).toBe(1);
+    const { code, stats } = buildViewModule(
+      `<form bq-on:submit="${handler}"><p bq-text="count"></p></form>`,
+      {},
+      false
+    );
+    expect(stats).toEqual({ total: 2, compiled: 2, skipped: [] });
+
+    // Run the emitted module against a stub registry to see what it registers.
+    const calls: Array<Array<Record<string, (ctx: unknown) => unknown>>> = [];
+    const { code: cjs } = await transform(code, { format: 'cjs', loader: 'js' });
+    const run = new Function('require', 'module', 'exports', cjs);
+    const module = { exports: {} as Record<string, unknown> };
+    run(
+      () => ({
+        registerCompiledExpressions: (...args: (typeof calls)[number]) => calls.push(args),
+      }),
+      module,
+      module.exports
+    );
+    expect(calls).toHaveLength(1);
+    const [expressions, statements] = calls[0]!;
+    expect(Object.keys(expressions!)).toEqual(['count']);
+    expect(Object.keys(statements!)).toEqual([handler]);
+
+    // Both statements run in order; the last one's value is the handler's value.
+    const order: string[] = [];
+    const ctx = {
+      $event: { preventDefault: () => order.push('preventDefault') },
+      add: () => (order.push('add'), 'added'),
+    };
+    expect(statements![handler]!(ctx)).toBe('added');
+    expect(order).toEqual(['preventDefault', 'add']);
+    expect(module.exports.default).toContain(`bq-on:submit="${handler}"`);
+  });
+
+  it('leaves a statement list outside bq-on to the runtime evaluator', () => {
+    const { stats } = buildViewModule('<p bq-show="a(); b()"></p>', {}, false);
+    expect(stats.compiled).toBe(0);
+    expect(stats.skipped.map((entry) => entry.expression)).toEqual(['a(); b()']);
   });
 
   it('compiles only bare view imports or the view marker', () => {

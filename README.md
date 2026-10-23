@@ -31,7 +31,7 @@ bun add -d @bquery/unplugin
 pnpm add -D @bquery/unplugin
 ```
 
-`@bquery/bquery` (`^1.17.2`) is a peer dependency. Install the bundler you use;
+`@bquery/bquery` (`^1.18.0`) is a peer dependency. Install the bundler you use;
 each one (`vite`, `rollup`, `webpack`, `@rspack/core`, `esbuild`) is an optional
 peer dependency.
 
@@ -174,10 +174,9 @@ with the render contract and the limitations.
 ## Compatibility
 
 - Node.js 24+ or Bun 1.4+.
-- `@bquery/bquery` 1.17.2 or later. `bq-on` handlers with several
-  `;`-separated statements (`$event.preventDefault(); add()`) are compiled only
-  by bQuery releases after 1.17.2, which also accept them at runtime. With
-  1.17.2 the plugin leaves them to the runtime evaluator and warns.
+- `@bquery/bquery` 1.18.0 or later. `bq-on` handlers with several
+  `;`-separated statements (`$event.preventDefault(); add()`) are compiled
+  like single expressions.
 - `csp` and `ssr` need the Vite dev server; other bundlers ignore them with
   one warning per build. webpack and Rspack use the same code paths through
   unplugin's adapters but are not covered by this package's test suite.
