@@ -153,6 +153,21 @@ keeps its status and headers, except `content-encoding`, `content-length` and
 hop-by-hop headers: its body is read decoded (as `fetch()` returns it), so
 those no longer describe what the middleware sends. Every `Set-Cookie` is kept.
 
+bQuery's SSR renderers drop every `<script>` from the template, including the
+`<script type="module" src="/src/main.ts">` client entry of `index.html`. Add
+the entry through the SSR context instead; it is injected once and gets the
+CSP nonce:
+
+```ts
+import { createSSRContext, renderToResponse } from '@bquery/bquery/ssr';
+
+export async function render(request: Request, ctx) {
+  const ssr = createSSRContext({ request, nonce: ctx.nonce });
+  ssr.head.add({ script: [{ src: '/src/main.ts', module: true }] });
+  return renderToResponse(ctx.template, { title: 'Home' }, { context: ssr });
+}
+```
+
 ## Options
 
 ```ts
