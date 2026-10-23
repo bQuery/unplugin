@@ -304,6 +304,8 @@ describe('vite dev server', () => {
     const res = await get('/bquery');
     expect(res.status).toBe(200);
     const html = await res.text();
+    // A full-page template keeps its doctype (bQuery 1.18+), so no quirks mode.
+    expect(html).toMatch(/^<!doctype html>/i);
     expect(html).toMatch(/<h1[^>]*>Rendered by bQuery<\/h1>/);
     expect(html).toContain('/@vite/client');
   });

@@ -31,7 +31,7 @@ bun add -d @bquery/unplugin
 pnpm add -D @bquery/unplugin
 ```
 
-`@bquery/bquery` (`^1.17.2`) is a peer dependency. Install the bundler you use;
+`@bquery/bquery` (`^1.18.0`) is a peer dependency. Install the bundler you use;
 each one (`vite`, `rollup`, `webpack`, `@rspack/core`, `esbuild`) is an optional
 peer dependency.
 
@@ -153,6 +153,21 @@ keeps its status and headers, except `content-encoding`, `content-length` and
 hop-by-hop headers: its body is read decoded (as `fetch()` returns it), so
 those no longer describe what the middleware sends. Every `Set-Cookie` is kept.
 
+bQuery's SSR renderers drop every `<script>` from the template, including the
+`<script type="module" src="/src/main.ts">` client entry of `index.html`. Add
+the entry through the SSR context instead; it is injected once and gets the
+CSP nonce:
+
+```ts
+import { createSSRContext, renderToResponse } from '@bquery/bquery/ssr';
+
+export async function render(request: Request, ctx) {
+  const ssr = createSSRContext({ request, nonce: ctx.nonce });
+  ssr.head.add({ script: [{ src: '/src/main.ts', module: true }] });
+  return renderToResponse(ctx.template, { title: 'Home' }, { context: ssr });
+}
+```
+
 ## Options
 
 ```ts
@@ -174,10 +189,9 @@ with the render contract and the limitations.
 ## Compatibility
 
 - Node.js 24+ or Bun 1.4+.
-- `@bquery/bquery` 1.17.2 or later. `bq-on` handlers with several
-  `;`-separated statements (`$event.preventDefault(); add()`) are compiled only
-  by bQuery releases after 1.17.2, which also accept them at runtime. With
-  1.17.2 the plugin leaves them to the runtime evaluator and warns.
+- `@bquery/bquery` 1.18.0 or later. `bq-on` handlers with several
+  `;`-separated statements (`$event.preventDefault(); add()`) are compiled
+  like single expressions.
 - `csp` and `ssr` need the Vite dev server; other bundlers ignore them with
   one warning per build. webpack and Rspack use the same code paths through
   unplugin's adapters but are not covered by this package's test suite.
